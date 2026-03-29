@@ -199,15 +199,34 @@ export interface LoginResult {
   error?: string;
 }
 
+/** Whether interactive (headed) browser login is available. */
+export function isInteractiveLoginEnabled(): boolean {
+  return process.env.UNBROWSE_DISABLE_INTERACTIVE_LOGIN !== "true";
+}
+
 /**
  * Open a visible (non-headless) browser for the user to complete login.
  * Waits up to 120s for navigation back to the target domain, then captures cookies.
+ *
+ * Disabled when UNBROWSE_DISABLE_INTERACTIVE_LOGIN=true (headless/remote deployments).
+ * Use unbrowse_import_cookies or the cookie sync API to provide auth instead.
  */
 export async function interactiveLogin(
   url: string,
   domain?: string,
   options?: { yolo?: boolean }
 ): Promise<LoginResult> {
+  if (!isInteractiveLoginEnabled()) {
+    const targetDomain = domain ?? new URL(url).hostname;
+    return {
+      success: false,
+      domain: targetDomain,
+      cookies_stored: 0,
+      error: "Interactive login is disabled on this server (UNBROWSE_DISABLE_INTERACTIVE_LOGIN=true). " +
+        "Use unbrowse_import_cookies to provide authentication cookies instead.",
+    };
+  }
+
   const targetDomain = domain ?? new URL(url).hostname;
 
   // Yolo mode: use the user's main Chrome profile instead of an isolated one
