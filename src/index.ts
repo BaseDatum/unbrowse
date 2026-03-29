@@ -10,6 +10,7 @@ import { shutdownAllBrowsers } from "./capture/index.js";
 import { initProviders } from "./providers.js";
 import { createMcpServer } from "./mcp/server.js";
 import { registerMcpTransport } from "./mcp/transport.js";
+import { startJobCleanup, stopJobCleanup } from "./jobs/index.js";
 
 // Kill any chrome-headless-shell orphans left over from a previous crashed session
 try {
@@ -40,6 +41,7 @@ const host = process.env.HOST ?? "127.0.0.1";
 
 async function shutdown(signal: string): Promise<void> {
   console.log(`[shutdown] ${signal} — closing browsers and server`);
+  stopJobCleanup();
   await shutdownAllBrowsers();
   await app.close();
   process.exit(0);
@@ -55,6 +57,7 @@ try {
     console.log(`MCP transport available at http://${host}:${port}${process.env.UNBROWSE_MCP_PATH ?? "/mcp"}`);
   }
   schedulePeriodicVerification();
+  startJobCleanup();
 } catch (err) {
   app.log.error(err);
   process.exit(1);

@@ -14,6 +14,14 @@ import { writeFileSync, existsSync, mkdirSync } from "fs";
 import { join } from "path";
 
 import type { RequestContext } from "../context.js";
+import { getUserId } from "../context.js";
+import {
+  startBackgroundJob,
+  jobStartedResponse,
+  jobStatusResponse,
+  getJob,
+  listJobs,
+} from "../jobs/index.js";
 
 const BETA_API_URL = "https://beta-api.unbrowse.ai";
 
@@ -60,15 +68,28 @@ export async function registerRoutes(app: FastifyInstance) {
 
   // POST /v1/intent/resolve
   app.post("/v1/intent/resolve", { config: { rateLimit: ROUTE_LIMITS["/v1/intent/resolve"] } }, async (req, reply) => {
-    const { intent, params, context, projection, confirm_unsafe, dry_run } = req.body as {
+    const { intent, params, context, projection, confirm_unsafe, dry_run, background } = req.body as {
       intent: string;
       params?: Record<string, unknown>;
       context?: { url?: string; domain?: string };
       projection?: ProjectionOptions;
       confirm_unsafe?: boolean;
       dry_run?: boolean;
+      background?: boolean;
     };
     if (!intent) return reply.code(400).send({ error: "intent required" });
+
+    if (background) {
+      return withCtx(req, () => {
+        const job = startBackgroundJob(
+          "resolve",
+          context?.url || context?.domain || intent,
+          () => resolveAndExecute(intent, params ?? {}, context, projection, { confirm_unsafe, dry_run }),
+        );
+        return reply.code(202).send(jobStartedResponse(job));
+      });
+    }
+
     try {
       const result = await withCtx(req, () => resolveAndExecute(intent, params ?? {}, context, projection, { confirm_unsafe, dry_run }));
 
@@ -210,6 +231,37 @@ export async function registerRoutes(app: FastifyInstance) {
     } catch (err) {
       return reply.code(500).send({ error: (err as Error).message });
     }
+  });
+
+  // ── Job management ────────────────────────────────────────────────
+
+  // GET /v1/jobs/:job_id — check job status
+  app.get("/v1/jobs/:job_id", async (req, reply) => {
+    const { job_id } = req.params as { job_id: string };
+    return withCtx(req, () => {
+      const userId = getUserId();
+      const job = getJob(job_id, userId);
+      if (!job) return reply.code(404).send({ error: `No job found with id '${job_id}'` });
+      return reply.send(jobStatusResponse(job));
+    });
+  });
+
+  // GET /v1/jobs — list all jobs for current user
+  app.get("/v1/jobs", async (req, reply) => {
+    return withCtx(req, () => {
+      const userId = getUserId();
+      const userJobs = listJobs(userId);
+      return reply.send({
+        jobs: userJobs.map((j) => ({
+          job_id: j.job_id,
+          tool: j.tool_name,
+          target: j.target,
+          status: j.status,
+          created_at: j.created_at,
+          completed_at: j.completed_at,
+        })),
+      });
+    });
   });
 
   // GET /health
