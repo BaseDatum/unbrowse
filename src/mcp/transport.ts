@@ -12,16 +12,15 @@
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { getAuthProvider, getProxyProvider } from "../providers.js";
 import { runWithContext, buildContext } from "../context.js";
+import { createMcpServer } from "./server.js";
 import type { AuthResult } from "../auth/provider.js";
 
 const MCP_PATH = process.env.UNBROWSE_MCP_PATH ?? "/mcp";
 
 export async function registerMcpTransport(
   app: FastifyInstance,
-  mcpServer: McpServer,
 ): Promise<void> {
   // Register as a Fastify plugin so the content-type parser override
   // is scoped to this encapsulation context only (doesn't affect REST routes).
@@ -39,12 +38,12 @@ export async function registerMcpTransport(
 
       // POST — tool calls, resource reads, etc.
       mcpApp.post(MCP_PATH, async (req: FastifyRequest, reply: FastifyReply) => {
-        await handleMcpRequest(req, reply, mcpServer);
+        await handleMcpRequest(req, reply);
       });
 
       // GET — SSE stream for server-initiated messages (required by spec)
       mcpApp.get(MCP_PATH, async (req: FastifyRequest, reply: FastifyReply) => {
-        await handleMcpRequest(req, reply, mcpServer);
+        await handleMcpRequest(req, reply);
       });
 
       // DELETE — session termination (no-op in stateless mode)
@@ -60,7 +59,6 @@ export async function registerMcpTransport(
 async function handleMcpRequest(
   req: FastifyRequest,
   reply: FastifyReply,
-  mcpServer: McpServer,
 ): Promise<void> {
   // Authenticate the request
   let auth: AuthResult;
@@ -83,7 +81,10 @@ async function handleMcpRequest(
       sessionIdGenerator: undefined, // stateless — no session IDs
     });
 
-    // Connect the MCP server to this transport
+    // Create a fresh McpServer per request — McpServer only supports one
+    // active transport at a time, so sharing one across concurrent requests
+    // causes "Already connected to a transport" errors.
+    const mcpServer = createMcpServer();
     await mcpServer.connect(transport);
 
     // Hijack BEFORE handleRequest — tells Fastify we own the response

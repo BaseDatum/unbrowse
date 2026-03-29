@@ -8,7 +8,6 @@ import { schedulePeriodicVerification } from "./verification/index.js";
 import { ensureRegistered } from "./client/index.js";
 import { shutdownAllBrowsers } from "./capture/index.js";
 import { initProviders } from "./providers.js";
-import { createMcpServer } from "./mcp/server.js";
 import { registerMcpTransport } from "./mcp/transport.js";
 import { startJobCleanup, stopJobCleanup } from "./jobs/index.js";
 
@@ -32,8 +31,7 @@ await registerRoutes(app);
 
 // Register MCP Streamable HTTP transport (unless explicitly disabled)
 if (process.env.UNBROWSE_MCP_ENABLED !== "false") {
-  const mcpServer = createMcpServer();
-  await registerMcpTransport(app, mcpServer);
+  await registerMcpTransport(app);
 }
 
 const port = Number(process.env.PORT ?? 6969);
