@@ -2,17 +2,32 @@ import { BrowserManager } from "agent-browser/dist/browser.js";
 import { executeCommand } from "agent-browser/dist/actions.js";
 import { nanoid } from "nanoid";
 import { getRegistrableDomain } from "../domain.js";
-import { getProfilePath } from "../auth/index.js";
+import { getUserId, getProxyConfig } from "../context.js";
+import { isMultiTenant } from "../providers.js";
 import { log } from "../logger.js";
 import fs from "node:fs";
+import path from "node:path";
+import os from "node:os";
 
 // BUG-GC-012: Use a real Chrome UA — HeadlessChrome is actively blocked by Google and others.
 const CHROME_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
-// Browser launch semaphore: max 3 concurrent browsers
-const MAX_CONCURRENT_BROWSERS = 3;
+// Browser concurrency limits (configurable via env)
+const MAX_CONCURRENT_BROWSERS = parseInt(
+  process.env.UNBROWSE_MAX_BROWSERS ?? (isMultiTenant() ? "6" : "3"),
+  10,
+);
+const MAX_BROWSERS_PER_USER = parseInt(
+  process.env.UNBROWSE_MAX_BROWSERS_PER_USER ?? "2",
+  10,
+);
+
+// Global semaphore
 let activeBrowsers = 0;
 const waitQueue: Array<() => void> = [];
+
+// Per-user counter (only enforced in multi-tenant mode)
+const perUserActive = new Map<string, number>();
 
 // Active browser registry — tracked for graceful shutdown
 const activeBrowserRegistry = new Set<InstanceType<typeof BrowserManager>>();
@@ -21,18 +36,42 @@ const activeBrowserRegistry = new Set<InstanceType<typeof BrowserManager>>();
 const CAPTURE_TIMEOUT_MS = 90_000;
 
 async function acquireBrowserSlot(): Promise<void> {
+  const userId = getUserId();
+
+  // Per-user limit check (multi-tenant only)
+  if (isMultiTenant()) {
+    const userCount = perUserActive.get(userId) ?? 0;
+    if (userCount >= MAX_BROWSERS_PER_USER) {
+      throw new Error(
+        `Browser concurrency limit reached (${MAX_BROWSERS_PER_USER} per user). ` +
+        "Wait for a current capture to finish before starting another.",
+      );
+    }
+  }
+
   if (activeBrowsers < MAX_CONCURRENT_BROWSERS) {
     activeBrowsers++;
+    perUserActive.set(userId, (perUserActive.get(userId) ?? 0) + 1);
     return;
   }
   return new Promise<void>((resolve) => {
-    waitQueue.push(() => { activeBrowsers++; resolve(); });
+    waitQueue.push(() => {
+      activeBrowsers++;
+      perUserActive.set(userId, (perUserActive.get(userId) ?? 0) + 1);
+      resolve();
+    });
   });
 }
 
 function releaseBrowserSlot(browser?: InstanceType<typeof BrowserManager>): void {
   if (browser) activeBrowserRegistry.delete(browser);
   activeBrowsers--;
+
+  const userId = getUserId();
+  const count = perUserActive.get(userId) ?? 1;
+  if (count <= 1) perUserActive.delete(userId);
+  else perUserActive.set(userId, count - 1);
+
   const next = waitQueue.shift();
   if (next) next();
 }
@@ -41,6 +80,50 @@ function releaseBrowserSlot(browser?: InstanceType<typeof BrowserManager>): void
 export async function shutdownAllBrowsers(): Promise<void> {
   await Promise.allSettled([...activeBrowserRegistry].map((b) => b.close()));
   activeBrowserRegistry.clear();
+}
+
+/**
+ * Returns the per-user profile directory for a given domain.
+ *
+ * Multi-tenant:  ~/.unbrowse/profiles/{userId}/{registrableDomain}
+ * Single-tenant: ~/.unbrowse/profiles/{registrableDomain}
+ */
+export function getProfilePath(domain: string): string {
+  const userId = getUserId();
+  const regDomain = getRegistrableDomain(domain);
+  if (userId === "local") {
+    return path.join(os.homedir(), ".unbrowse", "profiles", regDomain);
+  }
+  return path.join(os.homedir(), ".unbrowse", "profiles", userId, regDomain);
+}
+
+/**
+ * Build launch options with proxy config injected if available.
+ */
+function buildLaunchOpts(opts: {
+  headless: boolean;
+  profile?: string;
+  userAgent?: string;
+  executablePath?: string;
+}): Record<string, unknown> {
+  const proxy = getProxyConfig();
+  return {
+    action: "launch" as const,
+    id: nanoid(),
+    headless: opts.headless,
+    userAgent: opts.userAgent ?? CHROME_UA,
+    ...(opts.profile ? { profile: opts.profile } : {}),
+    ...(opts.executablePath ? { executablePath: opts.executablePath } : {}),
+    ...(proxy
+      ? {
+          proxy: {
+            server: proxy.server,
+            username: proxy.username,
+            password: proxy.password,
+          },
+        }
+      : {}),
+  };
 }
 
 export interface CapturedWsMessage {
@@ -92,13 +175,13 @@ export async function captureSession(
   if (hasProfile) {
     try {
       log("capture", `launching with persistent profile (headed): ${profileDir}`);
-      await browser.launch({ action: "launch", id: nanoid(), headless: false, profile: profileDir, userAgent: CHROME_UA });
+      await browser.launch(buildLaunchOpts({ headless: false, profile: profileDir }));
     } catch (err) {
       log("capture", `profile launch failed (${err}), falling back to headless ephemeral`);
-      await browser.launch({ action: "launch", id: nanoid(), headless: true, userAgent: CHROME_UA });
+      await browser.launch(buildLaunchOpts({ headless: true }));
     }
   } else {
-    await browser.launch({ action: "launch", id: nanoid(), headless: true, userAgent: CHROME_UA });
+    await browser.launch(buildLaunchOpts({ headless: true }));
   }
 
   if (authHeaders && Object.keys(authHeaders).length > 0) {
@@ -261,7 +344,7 @@ export async function executeInBrowser(
   const browser = new BrowserManager();
   activeBrowserRegistry.add(browser);
   try {
-  await browser.launch({ action: "launch", id: nanoid(), headless: true, userAgent: CHROME_UA });
+  await browser.launch(buildLaunchOpts({ headless: true }));
 
   const allHeaders = { ...authHeaders, ...requestHeaders };
   if (Object.keys(allHeaders).length > 0) {

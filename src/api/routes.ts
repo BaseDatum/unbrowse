@@ -7,11 +7,22 @@ import { interactiveLogin, extractBrowserAuth } from "../auth/index.js";
 import { publishSkill } from "../marketplace/index.js";
 import { recordFeedback, getApiKey } from "../client/index.js";
 import { ROUTE_LIMITS } from "../ratelimit/index.js";
+import { getAuthProvider, getProxyProvider } from "../providers.js";
+import { runWithContext, buildContext } from "../context.js";
 import type { ProjectionOptions } from "../types/index.js";
 import { writeFileSync, existsSync, mkdirSync } from "fs";
 import { join } from "path";
 
+import type { RequestContext } from "../context.js";
+
 const BETA_API_URL = "https://beta-api.unbrowse.ai";
+
+/** Extract the request context set by the preHandler hook and run fn within it. */
+async function withCtx<T>(req: { __unbrowseCtx?: RequestContext }, fn: () => Promise<T>): Promise<T> {
+  const ctx = (req as Record<string, unknown>).__unbrowseCtx as RequestContext | undefined;
+  if (ctx) return runWithContext(ctx, fn) as Promise<T>;
+  return fn();
+}
 
 const TRACES_DIR = process.env.TRACES_DIR ?? join(process.cwd(), "traces");
 
@@ -30,6 +41,23 @@ export async function registerRoutes(app: FastifyInstance) {
     }
   });
 
+  // Wrap all route handlers in user context via AsyncLocalStorage.
+  // In single-tenant mode, userId="local" (no auth required).
+  // In multi-tenant mode, validates auth and scopes vault/browser/proxy per user.
+  app.addHook("preHandler", async (req, reply) => {
+    if (req.url === "/health") return;
+    try {
+      const auth = await getAuthProvider().authenticate({
+        headers: req.headers as Record<string, string | string[] | undefined>,
+      });
+      const ctx = buildContext(auth, (userId) => getProxyProvider().getProxy(userId));
+      // Store on request so wrapWithContext can access it
+      (req as Record<string, unknown>).__unbrowseCtx = ctx;
+    } catch (err) {
+      return reply.code(401).send({ error: (err as Error).message });
+    }
+  });
+
   // POST /v1/intent/resolve
   app.post("/v1/intent/resolve", { config: { rateLimit: ROUTE_LIMITS["/v1/intent/resolve"] } }, async (req, reply) => {
     const { intent, params, context, projection, confirm_unsafe, dry_run } = req.body as {
@@ -42,7 +70,7 @@ export async function registerRoutes(app: FastifyInstance) {
     };
     if (!intent) return reply.code(400).send({ error: "intent required" });
     try {
-      const result = await resolveAndExecute(intent, params ?? {}, context, projection, { confirm_unsafe, dry_run });
+      const result = await withCtx(req, () => resolveAndExecute(intent, params ?? {}, context, projection, { confirm_unsafe, dry_run }));
 
       // Surface ranked endpoints so the calling agent can pick a better one
       const skill = result.skill;
@@ -83,7 +111,7 @@ export async function registerRoutes(app: FastifyInstance) {
     const skill = await getSkill(skill_id);
     if (!skill) return reply.code(404).send({ error: "Skill not found" });
     try {
-      const execResult = await executeSkill(skill, params ?? {}, projection, { confirm_unsafe, dry_run, intent });
+      const execResult = await withCtx(req, () => executeSkill(skill, params ?? {}, projection, { confirm_unsafe, dry_run, intent }));
       saveTrace(execResult.trace);
       return reply.send(execResult);
     } catch (err) {
@@ -121,7 +149,7 @@ export async function registerRoutes(app: FastifyInstance) {
     const { url, yolo } = req.body as { url: string; yolo?: boolean };
     if (!url) return reply.code(400).send({ error: "url required" });
     try {
-      const result = await interactiveLogin(url, undefined, { yolo });
+      const result = await withCtx(req, () => interactiveLogin(url, undefined, { yolo }));
       return reply.send(result);
     } catch (err) {
       return reply.code(500).send({ error: (err as Error).message });
@@ -139,10 +167,10 @@ export async function registerRoutes(app: FastifyInstance) {
     if (!url) return reply.code(400).send({ error: "url required" });
     try {
       const domain = new URL(url).hostname;
-      const result = await extractBrowserAuth(domain, {
+      const result = await withCtx(req, () => extractBrowserAuth(domain, {
         chromeProfile: chrome_profile,
         firefoxProfile: firefox_profile,
-      });
+      }));
       return reply.send(result);
     } catch (err) {
       return reply.code(500).send({ error: (err as Error).message });

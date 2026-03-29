@@ -23,7 +23,24 @@ When you call `POST /v1/intent/resolve`, the orchestrator follows this priority 
 
 Skills published by live capture become available to all agents on the network.
 
-## Quick Start
+## Connection Methods
+
+### MCP Transport (Recommended for AI agents)
+
+Unbrowse exposes a Streamable HTTP MCP endpoint at `/mcp`. Connect using any MCP-compatible client:
+
+```bash
+# Claude Code
+claude mcp add --transport http unbrowse http://localhost:6969/mcp
+
+# With authentication (multi-tenant mode)
+claude mcp add --transport http unbrowse http://localhost:6969/mcp \
+  --header "Authorization: Bearer <token>"
+```
+
+Available MCP tools: `unbrowse_resolve`, `unbrowse_execute`, `unbrowse_search`, `unbrowse_search_domain`, `unbrowse_login`, `unbrowse_steal_auth`, `unbrowse_feedback`, `unbrowse_verify`.
+
+### REST API (curl-based)
 
 Set the base URL:
 
