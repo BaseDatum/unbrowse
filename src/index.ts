@@ -42,8 +42,20 @@ const host = process.env.HOST ?? "127.0.0.1";
 async function shutdown(signal: string): Promise<void> {
   console.log(`[shutdown] ${signal} — closing browsers and server`);
   stopJobCleanup();
-  await shutdownAllBrowsers();
-  await app.close();
+
+  // Hard deadline: force exit if graceful shutdown takes too long.
+  // K8s sends SIGKILL at terminationGracePeriodSeconds (30s) anyway,
+  // but this ensures we don't hang on stuck browser processes.
+  const forceExit = setTimeout(() => {
+    console.error("[shutdown] graceful shutdown timed out, forcing exit");
+    process.exit(1);
+  }, 10_000);
+  forceExit.unref();
+
+  await Promise.allSettled([
+    shutdownAllBrowsers(),
+    app.close(),
+  ]);
   process.exit(0);
 }
 
