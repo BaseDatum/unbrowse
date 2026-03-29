@@ -10,10 +10,23 @@ import { detectSchemaDrift } from "../transform/drift.js";
 import { recordExecution } from "../client/index.js";
 import { validateManifest } from "../client/index.js";
 import { withRetry, isRetryableStatus } from "./retry.js";
+import { getProxyConfig } from "../context.js";
 import type { EndpointDescriptor, ExecutionOptions, ExecutionTrace, ProjectionOptions, SkillManifest } from "../types/index.js";
 import { nanoid } from "nanoid";
 import { getRegistrableDomain } from "../domain.js";
 import { extractFromDOM } from "../extraction/index.js";
+
+/**
+ * Build fetch options with proxy injected if available.
+ * Bun's fetch supports `proxy` option natively.
+ * Node.js would need an undici ProxyAgent — but unbrowse targets Bun.
+ */
+function proxyFetchOpts(): Record<string, string> {
+  const proxy = getProxyConfig();
+  if (!proxy) return {};
+  // Bun supports: fetch(url, { proxy: "http://user:pass@host:port" })
+  return { proxy: `http://${proxy.username}:${proxy.password}@${new URL(proxy.server).host}` };
+}
 
 export interface ExecutionResult {
   trace: ExecutionTrace;
@@ -447,7 +460,7 @@ export async function executeEndpoint(
     delete headers["sec-ch-ua-platform"];
     delete headers["upgrade-insecure-requests"];
 
-    const res = await fetch(url, { method: endpoint.method, headers, body: body ? JSON.stringify(body) : undefined });
+    const res = await fetch(url, { method: endpoint.method, headers, body: body ? JSON.stringify(body) : undefined, ...proxyFetchOpts() } as RequestInit);
     let data: unknown;
     const text = await res.text();
     try { data = JSON.parse(text); } catch { data = text; }

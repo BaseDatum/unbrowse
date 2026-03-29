@@ -1,6 +1,8 @@
 import { BrowserManager } from "agent-browser/dist/browser.js";
 import { executeCommand } from "agent-browser/dist/actions.js";
 import { storeCredential, getCredential } from "../vault/index.js";
+import { getProfilePath } from "../capture/index.js";
+import { getProxyConfig } from "../context.js";
 import { nanoid } from "nanoid";
 import { isDomainMatch, getRegistrableDomain } from "../domain.js";
 import { log } from "../logger.js";
@@ -77,14 +79,6 @@ function getChromeExecutablePath(): string | null {
   return candidates.find((p) => fs.existsSync(p)) ?? null;
 }
 
-/**
- * Returns the persistent profile directory for a given domain.
- * Stored under ~/.unbrowse/profiles/<registrableDomain>.
- * Exporting so capture/execute can also launch with the profile if needed.
- */
-export function getProfilePath(domain: string): string {
-  return path.join(os.homedir(), ".unbrowse", "profiles", getRegistrableDomain(domain));
-}
 /** Known auth provider hostnames — these are valid mid-flight redirect destinations. */
 const AUTH_PROVIDER_RE = /accounts\.google\.com|login\.microsoftonline\.com|auth0\.com|cognito-idp\.|appleid\.apple\.com|github\.com\/login|facebook\.com\/login|login\.salesforce\.com|okta\.com\/login|ping.*\.com\/as\/authorization/i;
 
@@ -246,7 +240,8 @@ export async function interactiveLogin(
 
   try {
     fs.mkdirSync(profileDir, { recursive: true });
-    log("auth", `launching headless:false browser with ${options?.yolo ? "main Chrome" : "persistent"} profile`);
+    const proxy = getProxyConfig();
+    log("auth", `launching headless:false browser with ${options?.yolo ? "main Chrome" : "persistent"} profile${proxy ? ` (proxy: ${proxy.server})` : ""}`);
     await browser.launch({
       action: "launch",
       id: nanoid(),
@@ -254,6 +249,7 @@ export async function interactiveLogin(
       profile: profileDir,
       userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
       ...(executablePath ? { executablePath } : {}),
+      ...(proxy ? { proxy: { server: proxy.server, username: proxy.username, password: proxy.password } } : {}),
     });
     log("auth", `browser launched — navigating to ${url}`);
     await executeCommand({ action: "navigate", id: nanoid(), url }, browser);

@@ -7,11 +7,18 @@ import { registerRateLimiter } from "./ratelimit/index.js";
 import { schedulePeriodicVerification } from "./verification/index.js";
 import { ensureRegistered } from "./client/index.js";
 import { shutdownAllBrowsers } from "./capture/index.js";
+import { initProviders } from "./providers.js";
+import { createMcpServer } from "./mcp/server.js";
+import { registerMcpTransport } from "./mcp/transport.js";
 
 // Kill any chrome-headless-shell orphans left over from a previous crashed session
 try {
   execSync("pkill -f chrome-headless-shell", { stdio: "ignore" });
 } catch { /* no orphans — ok */ }
+
+// Initialize providers (auth, vault, proxy) based on environment config.
+// Custom providers can be injected here when embedding unbrowse in another system.
+initProviders();
 
 // Auto-register with backend if no API key is configured
 await ensureRegistered();
@@ -21,6 +28,12 @@ const app = Fastify({ logger: true });
 await app.register(cors, { origin: true });
 await registerRateLimiter(app);
 await registerRoutes(app);
+
+// Register MCP Streamable HTTP transport (unless explicitly disabled)
+if (process.env.UNBROWSE_MCP_ENABLED !== "false") {
+  const mcpServer = createMcpServer();
+  await registerMcpTransport(app, mcpServer);
+}
 
 const port = Number(process.env.PORT ?? 6969);
 const host = process.env.HOST ?? "127.0.0.1";
@@ -38,6 +51,9 @@ process.on("SIGINT",  () => { shutdown("SIGINT").catch(() => process.exit(1)); }
 try {
   await app.listen({ port, host });
   console.log(`unbrowse running on http://${host}:${port}`);
+  if (process.env.UNBROWSE_MCP_ENABLED !== "false") {
+    console.log(`MCP transport available at http://${host}:${port}${process.env.UNBROWSE_MCP_PATH ?? "/mcp"}`);
+  }
   schedulePeriodicVerification();
 } catch (err) {
   app.log.error(err);

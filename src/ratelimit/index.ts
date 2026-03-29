@@ -1,10 +1,28 @@
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyRequest } from "fastify";
 import rateLimit from "@fastify/rate-limit";
+import { isMultiTenant } from "../providers.js";
 
 export async function registerRateLimiter(app: FastifyInstance): Promise<void> {
   await app.register(rateLimit, {
     max: 100,
     timeWindow: "1 minute",
+    // In multi-tenant mode, rate limit per user (from auth header).
+    // In single-tenant mode, rate limit per IP (default behavior).
+    ...(isMultiTenant()
+      ? {
+          keyGenerator: (req: FastifyRequest) => {
+            // Extract userId from Authorization header for rate limiting.
+            // This mirrors what the AuthProvider does, but avoids coupling.
+            const auth = req.headers["authorization"];
+            if (typeof auth === "string" && auth.startsWith("Bearer ")) {
+              return auth.slice(7).trim();
+            }
+            const userId = req.headers["x-user-id"];
+            if (typeof userId === "string") return userId;
+            return req.ip;
+          },
+        }
+      : {}),
   });
 }
 
