@@ -1,16 +1,13 @@
 /**
  * Streamable HTTP transport integration with Fastify.
  *
- * Mounts the MCP server at a configurable path (default: /mcp) on the
- * existing Fastify instance.  Uses stateless mode — each HTTP request
- * creates a fresh transport, processes the MCP message, and responds.
- * No server-side session state is maintained.
+ * Mounts the MCP server at a configurable path (default: /mcp) using
+ * a separate Fastify plugin context so the content-type parser override
+ * doesn't affect the REST API routes.
  *
- * Authentication:
- *   In multi-tenant mode, the Authorization header is validated via
- *   the configured AuthProvider before the MCP message is processed.
- *   The resulting userId is propagated through AsyncLocalStorage so
- *   all downstream operations (vault, browser, proxy) are scoped.
+ * IMPORTANT: The MCP SDK reads the raw request body stream itself.
+ * Fastify's default JSON parser must not consume it first, or the SDK
+ * sees an empty stream and returns "Invalid JSON" (400).
  */
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
@@ -22,30 +19,40 @@ import type { AuthResult } from "../auth/provider.js";
 
 const MCP_PATH = process.env.UNBROWSE_MCP_PATH ?? "/mcp";
 
-/**
- * Register MCP Streamable HTTP routes on the Fastify instance.
- *
- * The MCP SDK's StreamableHTTPServerTransport expects Node.js
- * IncomingMessage/ServerResponse, so we use Fastify's raw request/reply.
- */
 export async function registerMcpTransport(
   app: FastifyInstance,
   mcpServer: McpServer,
 ): Promise<void> {
-  // Handle POST (tool calls, resource reads, etc.)
-  app.post(MCP_PATH, { config: { rawBody: true } }, async (req: FastifyRequest, reply: FastifyReply) => {
-    await handleMcpRequest(req, reply, mcpServer);
-  });
+  // Register as a Fastify plugin so the content-type parser override
+  // is scoped to this encapsulation context only (doesn't affect REST routes).
+  await app.register(
+    async (mcpApp) => {
+      // Override the JSON parser to pass the body through unparsed.
+      // The MCP SDK will read from req.raw directly.
+      mcpApp.removeAllContentTypeParsers();
+      mcpApp.addContentTypeParser(
+        "*",
+        (_req: FastifyRequest, _payload: unknown, done: (err: null, body?: undefined) => void) => {
+          done(null, undefined);
+        },
+      );
 
-  // Handle GET (SSE stream for server-initiated messages — required by spec)
-  app.get(MCP_PATH, async (req: FastifyRequest, reply: FastifyReply) => {
-    await handleMcpRequest(req, reply, mcpServer);
-  });
+      // POST — tool calls, resource reads, etc.
+      mcpApp.post(MCP_PATH, async (req: FastifyRequest, reply: FastifyReply) => {
+        await handleMcpRequest(req, reply, mcpServer);
+      });
 
-  // Handle DELETE (session termination — no-op in stateless mode)
-  app.delete(MCP_PATH, async (_req: FastifyRequest, reply: FastifyReply) => {
-    reply.code(405).send({ error: "Session termination not supported in stateless mode" });
-  });
+      // GET — SSE stream for server-initiated messages (required by spec)
+      mcpApp.get(MCP_PATH, async (req: FastifyRequest, reply: FastifyReply) => {
+        await handleMcpRequest(req, reply, mcpServer);
+      });
+
+      // DELETE — session termination (no-op in stateless mode)
+      mcpApp.delete(MCP_PATH, async (_req: FastifyRequest, reply: FastifyReply) => {
+        reply.code(405).send({ error: "Session termination not supported in stateless mode" });
+      });
+    },
+  );
 
   app.log.info(`MCP Streamable HTTP transport mounted at ${MCP_PATH}`);
 }
@@ -79,10 +86,10 @@ async function handleMcpRequest(
     // Connect the MCP server to this transport
     await mcpServer.connect(transport);
 
+    // Hijack BEFORE handleRequest — tells Fastify we own the response
+    reply.hijack();
+
     // Let the transport handle the raw HTTP request/response
     await transport.handleRequest(req.raw, reply.raw);
-
-    // Mark the reply as sent (Fastify needs to know we handled it)
-    reply.hijack();
   });
 }
