@@ -198,6 +198,48 @@ export async function registerRoutes(app: FastifyInstance) {
     }
   });
 
+  // POST /v1/auth/cookies — import cookies into the per-user vault.
+  // Accepts an array of cookies in Playwright/Netscape format and stores
+  // them grouped by domain under `auth:{domain}` vault keys.
+  app.post("/v1/auth/cookies", { config: { rateLimit: { max: 30, timeWindow: "1 minute" } } }, async (req, reply) => {
+    const { cookies } = req.body as {
+      cookies: Array<{
+        name: string;
+        value: string;
+        domain: string;
+        path?: string;
+        expires?: number;
+        httpOnly?: boolean;
+        secure?: boolean;
+        sameSite?: string;
+      }>;
+    };
+    if (!cookies || !Array.isArray(cookies) || cookies.length === 0) {
+      return reply.code(400).send({ error: "cookies array required" });
+    }
+    try {
+      return await withCtx(req, async () => {
+        const byDomain = new Map<string, typeof cookies>();
+        for (const cookie of cookies) {
+          const domain = cookie.domain.replace(/^\./, "");
+          const existing = byDomain.get(domain) ?? [];
+          existing.push(cookie);
+          byDomain.set(domain, existing);
+        }
+        let totalStored = 0;
+        const domains: string[] = [];
+        for (const [domain, domainCookies] of byDomain) {
+          await storeCredential(`auth:${domain}`, JSON.stringify({ cookies: domainCookies }));
+          totalStored += domainCookies.length;
+          domains.push(domain);
+        }
+        return reply.send({ ok: true, cookies_stored: totalStored, domains });
+      });
+    } catch (err) {
+      return reply.code(500).send({ error: (err as Error).message });
+    }
+  });
+
   // POST /v1/skills/:skill_id/verify — trigger verification
   app.post("/v1/skills/:skill_id/verify", async (req, reply) => {
     const { skill_id } = req.params as { skill_id: string };

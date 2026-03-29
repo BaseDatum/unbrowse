@@ -16,6 +16,7 @@ import { resolveAndExecute } from "../orchestrator/index.js";
 import { getSkill } from "../client/index.js";
 import { executeSkill, rankEndpoints } from "../execution/index.js";
 import { interactiveLogin, extractBrowserAuth } from "../auth/index.js";
+import { storeCredential } from "../vault/index.js";
 import { recordFeedback } from "../client/index.js";
 import { getUserId } from "../context.js";
 import {
@@ -196,6 +197,52 @@ export function createMcpServer(): McpServer {
         firefoxProfile: firefox_profile,
       });
       return text(result);
+    },
+  );
+
+  // ── unbrowse_import_cookies ───────────────────────────────────────
+  mcp.tool(
+    "unbrowse_import_cookies",
+    "Import cookies for one or more domains into the vault. " +
+    "Cookies are stored per-user and automatically used for subsequent " +
+    "captures and executions on matching domains. Use this to bulk-import " +
+    "cookies from a browser export, cookie manager, or external sync system.",
+    {
+      cookies: z.array(z.object({
+        name: z.string(),
+        value: z.string(),
+        domain: z.string(),
+        path: z.string().optional(),
+        expires: z.number().optional(),
+        httpOnly: z.boolean().optional(),
+        secure: z.boolean().optional(),
+        sameSite: z.string().optional(),
+      })).describe("Array of cookies in Playwright/Netscape format"),
+    },
+    async ({ cookies }) => {
+      // Group cookies by domain (strip leading dot for vault key)
+      const byDomain = new Map<string, typeof cookies>();
+      for (const cookie of cookies) {
+        const domain = cookie.domain.replace(/^\./, "");
+        const existing = byDomain.get(domain) ?? [];
+        existing.push(cookie);
+        byDomain.set(domain, existing);
+      }
+
+      let totalStored = 0;
+      const domains: string[] = [];
+      for (const [domain, domainCookies] of byDomain) {
+        await storeCredential(`auth:${domain}`, JSON.stringify({ cookies: domainCookies }));
+        totalStored += domainCookies.length;
+        domains.push(domain);
+      }
+
+      return text({
+        ok: true,
+        cookies_stored: totalStored,
+        domains,
+        message: `Imported ${totalStored} cookies for ${domains.length} domain(s).`,
+      });
     },
   );
 
