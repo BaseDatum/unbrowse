@@ -9,6 +9,7 @@ import type { AuthProvider } from "./auth/provider.js";
 import { HeaderAuthProvider } from "./auth/provider.js";
 import type { VaultProvider } from "./vault/provider.js";
 import { FileVaultProvider } from "./vault/provider.js";
+import { TransitVaultProvider } from "./vault/transit.js";
 import type { ProxyProvider } from "./proxy/index.js";
 import { EnvProxyProvider } from "./proxy/index.js";
 
@@ -40,7 +41,12 @@ export function initProviders(overrides?: ProviderOverrides): void {
   const multiTenant = isMultiTenant();
 
   _authProvider = overrides?.auth ?? new HeaderAuthProvider(multiTenant);
-  _vaultProvider = overrides?.vault ?? new FileVaultProvider();
+
+  // Auto-select vault provider: use Transit when BAO_ADDR is set (K8s deployment),
+  // fall back to local encrypted file vault (local dev / single-tenant).
+  _vaultProvider = overrides?.vault
+    ?? (process.env.BAO_ADDR ? new TransitVaultProvider() : new FileVaultProvider());
+
   _proxyProvider = overrides?.proxy ?? new EnvProxyProvider();
 }
 
